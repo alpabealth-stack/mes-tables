@@ -821,7 +821,7 @@ dialog label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var
   <div class="foot">
     <button class="btn" id="export-json" type="button">Sauvegarder (.json)</button>
     <button class="btn" id="export-kml" type="button">Exporter pour My Maps (.kml)</button>
-    <label class="btn" for="import">Importer…</label><span class="hint" style="align-self:center;margin-left:auto">Version 3 nov. · toucher pour ajouter</span><input type="file" id="import" accept=".json,.kml,application/json" hidden>
+    <label class="btn" for="import">Importer…</label><span class="hint" style="align-self:center;margin-left:auto">Version 3 nov. (2) · toucher pour ajouter</span><input type="file" id="import" accept=".json,.kml,application/json" hidden>
   </div>
 </aside>
 <main id="map" aria-label="Carte"></main>
@@ -1052,10 +1052,17 @@ map.on("click",e=>{ if(pickCb){ const cb=pickCb; endPick(); cb(e.latlng); return
 /* Clic sur la carte : cherche les restos, cafés, hôtels… autour du point (OpenStreetMap) et propose de les ajouter */
 const KIND = {restaurant:["Restaurant","resto"],fast_food:["Restauration rapide","resto"],food_court:["Restauration","resto"],biergarten:["Brasserie","resto"],pub:["Pub","resto"],bar:["Bar","resto"],
   cafe:["Café","cafe"],ice_cream:["Glacier","glace"],hotel:["Hôtel","hotel"],guest_house:["Chambre d'hôtes","hotel"],motel:["Motel","hotel"],hostel:["Auberge","hotel"]};
-const OVERPASS = ["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
-async function overpass(q){
-  let last; for (const u of OVERPASS){ try{ const r=await fetch(u,{method:"POST",body:"data="+encodeURIComponent(q),headers:{"Content-Type":"application/x-www-form-urlencoded"}}); if(r.ok) return (await r.json()).elements||[]; last=r.status; }catch(e){ last=e; } }
-  throw new Error(last);
+const OVERPASS = ["https://overpass-api.de/api/interpreter","https://overpass.private.coffee/api/interpreter","https://maps.mail.ru/osm/tools/overpass/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+function fetchT(u,opt,ms){ const c=new AbortController(), id=setTimeout(()=>c.abort(),ms); return fetch(u,{...opt,signal:c.signal}).finally(()=>clearTimeout(id)); }
+/* Interroge tous les serveurs en même temps et garde la première réponse */
+function overpass(q){
+  return Promise.any(OVERPASS.map(u=>fetchT(u,{method:"POST",body:"data="+encodeURIComponent(q),headers:{"Content-Type":"application/x-www-form-urlencoded"}},9000)
+    .then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); }).then(j=>j.elements||[])));
+}
+async function reversePOI(ll){
+  const r=await fetchT("https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&accept-language=fr&lat="+ll.lat+"&lon="+ll.lng,{},6000);
+  const j=await r.json(); const k=KIND[j.type];
+  return (k&&j.name&&(j.category==="amenity"||j.category==="tourism"))?[{tags:{name:j.name,[j.category]:j.type},lat:+j.lat,lon:+j.lon}]:[];
 }
 const CUIS={french:"française",italian:"italienne",pizza:"pizza",japanese:"japonaise",sushi:"sushi",chinese:"chinoise",indian:"indienne",thai:"thaï",vietnamese:"vietnamienne",lebanese:"libanaise",greek:"grecque",spanish:"espagnole",mexican:"mexicaine",burger:"burger",crepe:"crêperie",seafood:"fruits de mer",steak_house:"viandes",regional:"régionale",asian:"asiatique",korean:"coréenne",american:"américaine",moroccan:"marocaine",kebab:"kebab",sandwich:"sandwichs",coffee_shop:"café",ice_cream:"glaces",bagel:"bagels",brasserie:"brasserie",fish:"poisson",portuguese:"portugaise",peruvian:"péruvienne",argentinian:"argentine",international:"internationale",vegetarian:"végétarienne",vegan:"végane"};
 function cuisineFr(c){ return c ? (CUIS[c]||c.replace(/_/g," ")) : ""; }
@@ -1064,20 +1071,16 @@ async function lookupHere(ll){
   const seq=++lookupSeq;
   if (map.getZoom()<15){ L.popup().setLatLng(ll).setContent('<div class="pp">Zoome davantage, puis touche le resto à ajouter.</div>').openOn(map); return; }
   const pop=L.popup({maxWidth:300}).setLatLng(ll).setContent('<div class="pp">Recherche des lieux à cet endroit…</div>').openOn(map);
-  const types=Object.keys(KIND).join("|");
-  let found=[];
-  try{
-    for (const r of [40,90]){
-      const els=await overpass('[out:json][timeout:12];nwr(around:'+r+','+ll.lat+','+ll.lng+')[~"^(amenity|tourism)$"~"^('+types+')$"][name];out center 12;');
-      found=els.map(x=>{ const tg=x.tags||{}, k=KIND[tg.amenity]||KIND[tg.tourism]; const lat=x.lat??x.center?.lat, lng=x.lon??x.center?.lon;
-        return k&&lat!=null?{nom:tg.name,lat,lng,kind:k[0],cat:k[1],cuisine:cuisineFr((tg.cuisine||"").split(";")[0]),d:km(ll,{lat,lng})}:null; }).filter(Boolean);
-      if (found.length) break;
-    }
-  }catch(e){
-    if(seq!==lookupSeq) return;
-    pop.setContent('<div class="pp">La recherche ne répond pas pour le moment.<div class="acts" style="margin-top:8px"><button class="btn" id="add-here">Ajouter à cet endroit</button></div></div>');
-    bindAddHere(ll); return;
-  }
+  const am=Object.keys(KIND).filter(k=>KIND[k][1]!=="hotel").join("|"), to=Object.keys(KIND).filter(k=>KIND[k][1]==="hotel").join("|");
+  const around='(around:70,'+ll.lat+','+ll.lng+')';
+  const slow=setTimeout(()=>{ if(seq===lookupSeq) pop.setContent('<div class="pp">La recherche est un peu lente, patiente quelques secondes…</div>'); },3500);
+  let found=[], els=[];
+  try{ els=await overpass('[out:json][timeout:8];(nwr'+around+'[amenity~"^('+am+')$"][name];nwr'+around+'[tourism~"^('+to+')$"][name];);out center 15;'); }catch(e){}
+  if(!els.length){ try{ els=await reversePOI(ll); }catch(e){} }
+  clearTimeout(slow);
+  if(seq!==lookupSeq) return;
+  found=els.map(x=>{ const tg=x.tags||{}, k=KIND[tg.amenity]||KIND[tg.tourism]; const lat=x.lat??x.center?.lat, lng=x.lon??x.center?.lon;
+    return k&&lat!=null?{nom:tg.name,lat,lng,kind:k[0],cat:k[1],cuisine:cuisineFr((tg.cuisine||"").split(";")[0]),d:km(ll,{lat,lng})}:null; }).filter(Boolean);
   if(seq!==lookupSeq) return;
   found.sort((a,b)=>a.d-b.d); found=found.slice(0,6);
   const sw='<div class="swatches">'+[4,3,2,1].map(n=>'<button type="button" data-n="'+n+'" title="'+NOTES[n]+'" aria-label="'+NOTES[n]+'" style="background:var('+NOTE_VAR[n]+')"></button>').join("")+
@@ -1087,7 +1090,7 @@ async function lookupHere(ll){
         const dup=data.some(x=>km(x,f)<0.06&&x.nom.toLowerCase()===f.nom.toLowerCase());
         return '<div data-i="'+i+'"><div class="nm">'+esc(f.nom)+'</div><div class="kind">'+esc(f.kind)+(f.cuisine?' · '+esc(f.cuisine):'')+'</div>'+(dup?'<div class="kind">Déjà sur ta carte</div>':sw)+'</div>'; }).join("")+
       '</div><div class="acts" style="margin-top:10px"><button class="btn" id="add-here">Autre lieu à cet endroit</button></div></div>'
-    : '<div class="pp">Aucun resto, café ou hôtel trouvé ici. Touche plus près de son icône sur le plan, ou :<div class="acts" style="margin-top:8px"><button class="btn" id="add-here">Ajouter à cet endroit</button></div></div>';
+    : '<div class="pp">Aucun resto, café ou hôtel trouvé ici (ou la recherche ne répond pas). Touche plus près de son icône sur le plan, ou :<div class="acts" style="margin-top:8px"><button class="btn" id="add-here">Ajouter à cet endroit</button></div></div>';
   pop.setContent(html);
   const el=pop.getElement(); if(!el) return;
   el.querySelectorAll(".near [data-i]").forEach(row=>row.querySelectorAll(".swatches button").forEach(b=>b.onclick=()=>{
