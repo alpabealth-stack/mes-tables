@@ -748,6 +748,13 @@ input[type=search]{flex:1}
 .pp h3{font:700 17px/1.2 var(--display);margin:0 0 4px}
 .pp .meta{color:#555;font-size:12px;margin-bottom:8px}
 .pp .acts{display:flex;flex-wrap:wrap;gap:6px}
+.near{display:flex;flex-direction:column;gap:10px;max-height:260px;overflow:auto}
+.near .nm{font-weight:600}
+.near .kind{font-size:12px;color:#666}
+.swatches{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap}
+.swatches button{width:30px;height:30px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.25);padding:0}
+.swatches button.tst{background:#fff;border:2.5px dashed var(--tester)}
+.swatches button:hover{transform:scale(1.12)}
 .pp a,.pp button{font-size:12px}
 dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);padding:0;width:min(440px,calc(100vw - 32px));max-height:calc(100vh - 32px)}
 dialog::backdrop{background:rgba(0,0,0,.35)}
@@ -1040,7 +1047,57 @@ $("addr").onkeydown=e=>{ if(e.key==="Enter") $("addr-go").click(); };
 let pickCb=null;
 function startPick(text,cb){ pickCb=cb; document.body.classList.add("picking"); $("banner").textContent=text+" (Échap pour annuler)"; $("banner").hidden=false; }
 function endPick(){ pickCb=null; document.body.classList.remove("picking"); $("banner").hidden=true; }
-map.on("click",e=>{ if(pickCb){ const cb=pickCb; endPick(); cb(e.latlng); } });
+map.on("click",e=>{ if(pickCb){ const cb=pickCb; endPick(); cb(e.latlng); return; } lookupHere(e.latlng); });
+
+/* Clic sur la carte : cherche les restos, cafés, hôtels… autour du point (OpenStreetMap) et propose de les ajouter */
+const KIND = {restaurant:["Restaurant","resto"],fast_food:["Restauration rapide","resto"],food_court:["Restauration","resto"],biergarten:["Brasserie","resto"],pub:["Pub","resto"],bar:["Bar","resto"],
+  cafe:["Café","cafe"],ice_cream:["Glacier","glace"],hotel:["Hôtel","hotel"],guest_house:["Chambre d'hôtes","hotel"],motel:["Motel","hotel"],hostel:["Auberge","hotel"]};
+const OVERPASS = ["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+async function overpass(q){
+  let last; for (const u of OVERPASS){ try{ const r=await fetch(u,{method:"POST",body:"data="+encodeURIComponent(q),headers:{"Content-Type":"application/x-www-form-urlencoded"}}); if(r.ok) return (await r.json()).elements||[]; last=r.status; }catch(e){ last=e; } }
+  throw new Error(last);
+}
+const CUIS={french:"française",italian:"italienne",pizza:"pizza",japanese:"japonaise",sushi:"sushi",chinese:"chinoise",indian:"indienne",thai:"thaï",vietnamese:"vietnamienne",lebanese:"libanaise",greek:"grecque",spanish:"espagnole",mexican:"mexicaine",burger:"burger",crepe:"crêperie",seafood:"fruits de mer",steak_house:"viandes",regional:"régionale",asian:"asiatique",korean:"coréenne",american:"américaine",moroccan:"marocaine",kebab:"kebab",sandwich:"sandwichs",coffee_shop:"café",ice_cream:"glaces",bagel:"bagels",brasserie:"brasserie",fish:"poisson",portuguese:"portugaise",peruvian:"péruvienne",argentinian:"argentine",international:"internationale",vegetarian:"végétarienne",vegan:"végane"};
+function cuisineFr(c){ return c ? (CUIS[c]||c.replace(/_/g," ")) : ""; }
+let lookupSeq=0;
+async function lookupHere(ll){
+  const seq=++lookupSeq;
+  if (map.getZoom()<15){ L.popup().setLatLng(ll).setContent('<div class="pp">Zoome davantage, puis touche le resto à ajouter.</div>').openOn(map); return; }
+  const pop=L.popup({maxWidth:300}).setLatLng(ll).setContent('<div class="pp">Recherche des lieux à cet endroit…</div>').openOn(map);
+  const types=Object.keys(KIND).join("|");
+  let found=[];
+  try{
+    for (const r of [40,90]){
+      const els=await overpass('[out:json][timeout:12];nwr(around:'+r+','+ll.lat+','+ll.lng+')[~"^(amenity|tourism)$"~"^('+types+')$"][name];out center 12;');
+      found=els.map(x=>{ const tg=x.tags||{}, k=KIND[tg.amenity]||KIND[tg.tourism]; const lat=x.lat??x.center?.lat, lng=x.lon??x.center?.lon;
+        return k&&lat!=null?{nom:tg.name,lat,lng,kind:k[0],cat:k[1],cuisine:cuisineFr((tg.cuisine||"").split(";")[0]),d:km(ll,{lat,lng})}:null; }).filter(Boolean);
+      if (found.length) break;
+    }
+  }catch(e){
+    if(seq!==lookupSeq) return;
+    pop.setContent('<div class="pp">La recherche ne répond pas pour le moment.<div class="acts" style="margin-top:8px"><button class="btn" id="add-here">Ajouter à cet endroit</button></div></div>');
+    bindAddHere(ll); return;
+  }
+  if(seq!==lookupSeq) return;
+  found.sort((a,b)=>a.d-b.d); found=found.slice(0,6);
+  const sw='<div class="swatches">'+[4,3,2,1].map(n=>'<button type="button" data-n="'+n+'" title="'+NOTES[n]+'" aria-label="'+NOTES[n]+'" style="background:var('+NOTE_VAR[n]+')"></button>').join("")+
+    '<button type="button" class="tst" data-n="t" title="À tester" aria-label="À tester"></button></div>';
+  const html = found.length
+    ? '<div class="pp"><h3>Ajouter à ta carte</h3><div class="meta">Touche une couleur : excellent, bon, moyen, décevant, ou à tester (pointillés).</div><div class="near">'+found.map((f,i)=>{
+        const dup=data.some(x=>km(x,f)<0.06&&x.nom.toLowerCase()===f.nom.toLowerCase());
+        return '<div data-i="'+i+'"><div class="nm">'+esc(f.nom)+'</div><div class="kind">'+esc(f.kind)+(f.cuisine?' · '+esc(f.cuisine):'')+'</div>'+(dup?'<div class="kind">Déjà sur ta carte</div>':sw)+'</div>'; }).join("")+
+      '</div><div class="acts" style="margin-top:10px"><button class="btn" id="add-here">Autre lieu à cet endroit</button></div></div>'
+    : '<div class="pp">Aucun resto, café ou hôtel trouvé ici. Touche plus près de son icône sur le plan, ou :<div class="acts" style="margin-top:8px"><button class="btn" id="add-here">Ajouter à cet endroit</button></div></div>';
+  pop.setContent(html);
+  const el=pop.getElement(); if(!el) return;
+  el.querySelectorAll(".near [data-i]").forEach(row=>row.querySelectorAll(".swatches button").forEach(b=>b.onclick=()=>{
+    const f=found[+row.dataset.i], tst=b.dataset.n==="t";
+    const p={id:"u"+Date.now(),nom:f.nom,lat:f.lat,lng:f.lng,cat:f.cat,note:tst?0:+b.dataset.n,statut:tst?"tester":"fait"};
+    data.push(p); save(); map.closePopup(); render(); setTimeout(()=>openPopup(p),60);
+  }));
+  bindAddHere(ll);
+}
+function bindAddHere(ll){ const b=document.getElementById("add-here"); if(b) b.onclick=()=>{ map.closePopup(); openEditor(null); draftPos={lat:ll.lat,lng:ll.lng}; showPos(); }; }
 document.addEventListener("keydown",e=>{ if(e.key==="Escape"&&pickCb){ const cb=pickCb; endPick(); cb(null); } });
 $("pick-origin").onclick=()=>{ document.body.classList.add("collapsed"); startPick("Touche la carte pour placer ton point de départ",ll=>{ if(ll) setOrigin(ll,"le point choisi"); }); };
 
